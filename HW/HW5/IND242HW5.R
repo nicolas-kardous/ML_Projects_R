@@ -1,0 +1,217 @@
+# IND242HW5
+# Nicolas Kardous
+
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(MASS)
+library(caTools)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(caret)
+library(tm.plugin.webmining)
+
+library(softImpute)
+library(ranger)
+library(tidyverse)
+library(reshape2)
+
+# Part a
+
+Songs = read.csv("Songs.csv")
+MusicRatings = read.csv("MusicRatings.csv")
+Users = read.csv("Users.csv")
+
+min(data_MusicRatings$rating)
+max(data_MusicRatings$rating)
+
+# a)
+
+set.seed(345)
+
+train.ids <- sample(nrow(MusicRatings), 0.84*nrow(MusicRatings))
+train.mr <- MusicRatings[train.ids,]
+test <- MusicRatings[-train.ids,]
+
+# split testing into real testing and validation set
+
+test.ids <- sample(nrow(test), 0.5*nrow(test))
+test.mr <- test[test.ids,]
+validation <- test[-test.ids,]
+
+# Split validation into validation A and validation B
+
+val.ids <- sample(nrow(validation), 0.5*nrow(validation))
+validationA <- validation[val.ids,]
+validationB <- validation[-val.ids,]
+
+#a)
+train.mr
+#b))
+validationA
+#c)
+validationB
+#d)
+test.mr
+
+# Construct an incomplete training set ratings matrix
+
+mat.train <- Incomplete(train.mr$userID, train.mr$songID, train.mr$rating)
+
+# Part b)
+
+# i)
+
+# In the dataset, there are three parameters included in model 1, the alpha term, beta term, and the noise term. From our training set, 
+#we have 243,103 observations to train the model with.
+
+# ii)
+
+mat.train.centered <- biScale(mat.train, maxit = 10000, row.scale = FALSE, col.scale = FALSE)
+# mat.train.centered is X_ij - alpha_i - beta_j
+alpha <- attr(mat.train.centered, "biScale:row")$center
+beta <- attr(mat.train.centered, "biScale:column")$center
+
+Users$alpha <- alpha
+Songs$beta <- beta
+
+length(alpha)+length(beta)
+
+Decreasing_Song <- sort(Songs$beta, decreasing = TRUE)
+Decreasing_Song[1]
+Decreasing_Song[2]
+Decreasing_Song[3]
+
+#iii)
+
+Decreasing_Users <- sort(Users$alpha, decreasing = TRUE)
+Decreasing_Users[1]
+Decreasing_Users[2]
+Decreasing_Users[3]
+
+#iv)
+
+OSR2 <- function(predictions, train, test) {
+  SSE <- sum((test - predictions)^2)
+  SST <- sum((test - mean(train))^2)
+  r2 <- 1 - SSE/SST
+  return(r2)
+}
+
+X_ij = Users$alpha[test.mr$userID] + Songs$beta[test.mr$songID]
+
+Partb_MAE <- mean(abs(X_ij - test.mr$rating))
+Partb_RMSE <- sqrt(mean((X_ij - test.mr$rating)^2))
+Partb_OSR2 <- OSR2(X_ij, train.mr$rating, test.mr$rating)
+
+# Part c)
+
+# i)
+
+# In the dataset, there are four parameters included in model 2, the alpha term, beta term, the noise term, and the Z term. From our training set, 
+#we have 243,103 observations to train the model with.
+
+# ii)
+
+# compute validation set MAE for rank = 1,2,...,20
+mae.vals.cii = rep(NA, 20)
+for (rnk in seq_len(20)) {
+  print(str_c("Trying rank.max = ", rnk))
+  mod.cii <- softImpute(mat.train.centered, rank.max = rnk, lambda = 0, maxit = 1000)
+  preds.cii <- impute(mod.cii, validationA$userID, validationA$songID) %>% pmin(5) %>% pmax(1)
+  mae.vals.cii[rnk] <- mean(abs(preds.cii - validationA$rating))
+}
+
+mae.val.cii.df <- data.frame(rnk = seq_len(20), mae = mae.vals.cii)
+ggplot(mae.val.cii.df, aes(x = rnk, y = mae)) + geom_point(size = 3) + 
+  ylab("Validation MAE") + xlab("Number of Archetypal Users") + 
+  theme_bw() + theme(axis.title=element_text(size=18), axis.text=element_text(size=18))
+
+mae.vals.cii
+min(mae.vals.cii)
+
+# iii)
+
+# choose k = 4
+
+mod.ciii.final <- softImpute(mat.train.centered, rank.max = 4, lambda = 0, maxit = 1000)
+preds.ciii.final <- impute(mod.ciii.final, test$userID, test$songID) %>% pmin(5) %>% pmax(1)
+
+Partc_MAE <- mean(abs(preds.ciii.final - test.mr$rating))
+Partc_RMSE <- sqrt(mean((preds.ciii.final - test.mr$rating)^2))
+Partc_OSR2 <- OSR2(preds.ciii.final, train.mr$rating, test.mr$rating)
+
+
+# Part d)
+
+# i)
+
+# Create a copy of training and testing set, and 
+# add genre and year to the training set and testing set
+
+train.mr.new <- train.mr
+train.mr.new <- inner_join(train.mr.new,Songs,by='songID')
+
+test.mr.new <- test.mr
+test.mr.new <- inner_join(test.mr.new,Songs,by='songID')
+
+# Treat as factors/categorical variables
+
+train.mr.new$year = as.factor(train.mr.new$year)
+train.mr.new$genre = as.factor(train.mr.new$genre)
+test.mr.new$year = as.factor(test.mr.new$year)
+test.mr.new$genre = as.factor(test.mr.new$genre)
+
+# Train Linear Regression model
+
+LR <- lm(rating ~ year + genre, data=train.mr.new)
+summary(LR)
+LRPredictions <- predict(LR, newdata=test.mr.new)
+
+Partd_LR_MAE <- mean(abs(LRPredictions - test.mr.new$rating))
+Partd_LR_RMSE <- sqrt(mean((LRPredictions - test.mr.new$rating)^2))
+Partd_LR_OSR2 <- OSR2(LRPredictions, train.mr.new$rating, test.mr.new$rating)
+
+# Train Random Forest model
+
+RF = randomForest(rating ~ year + genre, data=train.mr.new)
+RFPredictions = predict(RF, newdata = test.mr.new)
+table(test.mr.new$rating, RFPredictions)
+
+Partd_RF_MAE <- mean(abs(RFPredictions - test.mr.new$rating))
+Partd_RF_RMSE <- sqrt(mean((RFPredictions - test.mr.new$rating)^2))
+Partd_RF_OSR2 <- OSR2(RFPredictions, train.mr.new$rating, test.mr.new$rating)
+
+
+# ii)
+
+validationB <- inner_join(validationB,Songs,by='songID')
+validationB$year = as.factor(validationB$year)
+validationB$genre = as.factor(validationB$genre)
+
+# Blending
+
+val.preds.cf <- impute(mod.ciii.final, validationB$userID, validationB$songID)
+val.preds.lm <- predict(LR, newdata = validationB)
+val.preds.rf <- predict(RF, newdata = validationB)
+
+# Build validation set data frame
+val.blending_df = data.frame(rating = validationB$rating, cf_preds = val.preds.cf, 
+                             lm_preds = val.preds.lm, rf_preds = val.preds.rf)
+
+# Train blended model
+blend.mod = lm(rating ~ . -1, data = val.blending_df)
+summary(blend.mod)
+# Test blended model
+test.blending_df = data.frame(rating = test.mr.new$rating, cf_preds = preds.ciii.final, 
+                              lm_preds = LRPredictions, rf_preds = RFPredictions)
+
+test.preds.blend <- predict(blend.mod, newdata = test.blending_df)
+
+Partd_blend_MAE <- mean(abs(test.preds.blend - test.mr.new$rating))
+Partd_blend_RMSE <- sqrt(mean((test.preds.blend - test.mr.new$rating)^2))
+Partd_blend_OSR2 <- OSR2(test.preds.blend, train.mr.new$rating, test.mr.new$rating)
+
+

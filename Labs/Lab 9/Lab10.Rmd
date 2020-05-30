@@ -1,0 +1,588 @@
+---
+title: "IEOR 242 -- Ames Housing Analysis"
+author: "Paul Grigas"
+date: "April 2019"
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+# Preliminaries
+
+First, let's load required packages.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(stringr)
+library(glmnet) # regularization
+library(pls) # for pcr
+library(randomForest)
+library(caret)
+library(leaps) # for forward linear regression
+```
+
+Now, let's load the dataset:
+
+```{r, message=FALSE, warning=FALSE}
+ames <- read.csv("Ames.csv")
+
+```
+
+# Cleaning
+
+First do some basic cleaning / EDA.
+
+```{r,  message=FALSE, warning=FALSE}
+summary(ames$SalePrice)
+ames %>% ggplot(aes(x = SalePrice)) + geom_histogram(binwidth = 20000)
+ames %>% ggplot(aes(x = SalePrice)) + geom_density()
+```
+
+Let's take log to be more fair in comparing high vs low price homes
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% mutate(LogSalePrice = log(SalePrice))
+ames <- ames %>% select(LogSalePrice, everything())
+ames$SalePrice <- NULL
+
+summary(ames$LogSalePrice)
+ames %>% ggplot(aes(x = LogSalePrice)) + geom_density()
+```
+
+## Fix Condition variables
+
+Convert condition into dummy variables. We want variables that are equal to 1 if the condition is satisfied, which is either the case if Condition1 or Condition2 has the corresponding value.
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% mutate(Artery = ifelse(Condition1 == "Artery" | Condition2 == "Artery", 1, 0),
+                        Feedr = ifelse(Condition1 == "Feedr" | Condition2 == "Feedr", 1, 0),
+                        PosA = ifelse(Condition1 == "PosA" | Condition2 == "PosA", 1, 0),
+                        PosN = ifelse(Condition1 == "PosN" | Condition2 == "PosN", 1, 0),
+                        RRAe = ifelse(Condition1 == "RRAe" | Condition2 == "RRAe", 1, 0),
+                        RRAn = ifelse(Condition1 == "RRAn" | Condition2 == "RRAn", 1, 0),
+                        RRNe = ifelse(Condition1 == "RRNe", 1, 0),
+                        RRNn = ifelse(Condition1 == "RRNn" | Condition2 == "RRNn", 1, 0))
+ames$Condition1 <- NULL
+ames$Condition2 <- NULL
+```
+
+## Exterior 1st/2nd
+
+Treat the same way as condition.
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% mutate(ExteriorAsbShng = ifelse(Exterior1st == "AsbShng" | Exterior2nd == "AsbShng", 1, 0),
+                        ExteriorAsphShn = ifelse(Exterior1st == "AsphShn" | Exterior2nd == "AsphShn", 1, 0),
+                        ExteriorBrkComm = ifelse(Exterior1st == "BrkComm" | Exterior2nd == "Brk Cmn", 1, 0),
+                        ExteriorBrkFace = ifelse(Exterior1st == "BrkFace" | Exterior2nd == "BrkFace", 1, 0),
+                        ExteriorCBlock = ifelse(Exterior1st == "CBlock" | Exterior2nd == "CBlock", 1, 0),
+                        ExteriorCemntBd = ifelse(Exterior1st == "CemntBd" | Exterior2nd == "CemntBd", 1, 0),
+                        ExteriorHdBoard = ifelse(Exterior1st == "HdBoard" | Exterior2nd == "HdBoard", 1, 0),
+                        ExteriorImStucc = ifelse(Exterior1st == "ImStucc" | Exterior2nd == "ImStucc", 1, 0),
+                        ExteriorMetalSd = ifelse(Exterior1st == "MetalSd" | Exterior2nd == "MetalSd", 1, 0),
+                        ExteriorPlywood = ifelse(Exterior1st == "Plywood" | Exterior2nd == "Plywood", 1, 0),
+                        ExteriorPreCast = ifelse(Exterior1st == "PreCast" | Exterior2nd == "PreCast", 1, 0),
+                        ExteriorStone = ifelse(Exterior1st == "Stone" | Exterior2nd == "Stone", 1, 0),
+                        ExteriorStucco = ifelse(Exterior1st == "Stucco" | Exterior2nd == "Stucco", 1, 0),
+                        ExteriorVinylSd = ifelse(Exterior1st == "VinylSd" | Exterior2nd == "VinylSd", 1, 0),
+                        ExteriorWdSdng = ifelse(Exterior1st == "Wd Sdng" | Exterior2nd == "Wd Sdng", 1, 0),
+                        ExteriorWdShing = ifelse(Exterior1st == "WdShing" | Exterior2nd == "Wd Shng", 1, 0),
+                        ExteriorOther = ifelse(Exterior2nd == "AsbShng", 1, 0))
+#View(select(ames, starts_with("Exterior")))
+ames$Exterior1st <- NULL
+ames$Exterior2nd <- NULL
+```
+## Quality variables
+
+Let's look at the overall quality/condition variables.
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = as.factor(OverallQual), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(OverallCond), y = LogSalePrice)) + geom_boxplot()
+```
+
+Let's convert these to factors.
+
+```{r,  message=FALSE, warning=FALSE}
+ames$OverallQual <- as.factor(ames$OverallQual)
+ames$OverallCond <- as.factor(ames$OverallCond)
+```
+
+## Years Built/Remodeled
+
+Let's see how sale price is affected by the year built and year remodeled.
+
+```{r,  message=FALSE, warning=FALSE}
+summary(ames$YearBuilt)
+summary(ames$YearRemod.Add)
+```
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = YearBuilt, y = LogSalePrice)) + geom_line()
+ames %>% ggplot(aes(x = YearRemod.Add, y = LogSalePrice)) + geom_line()
+```
+
+Let's add features:
+* YearsSince1950Built -- number of years after 1950 that the home was built (if before 1950, set to 0)
+* YearsSince1950Remod -- number of years after 1950 that the home was remodeled
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% mutate(YearsSince1950Built = ifelse(YearBuilt > 1950, YearBuilt - 1950, 0),
+                        YearsSince1950Remod = YearRemod.Add - 1950)
+ames$YearBuilt <- NULL
+ames$YearRemod.Add <- NULL
+```
+
+
+
+## Year Garage Built
+
+Plot:
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = GarageYrBlt, y = LogSalePrice)) + geom_line()
+```
+
+Throw away mistake.
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% mutate(GarageYrBlt = ifelse(GarageYrBlt > 2015, NA, GarageYrBlt))
+ames %>% ggplot(aes(x = GarageYrBlt, y = LogSalePrice)) + geom_line()
+```
+
+Let's apply the same 1950 transformation.
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% mutate(YearsSince1950GarageBuilt = ifelse(GarageYrBlt > 1950, GarageYrBlt - 1950, 0))
+ames$GarageYrBlt <- NULL
+```
+
+## Time sold
+
+Convert time sold to factor
+
+```{r,  message=FALSE, warning=FALSE}
+ames$YrSold <- as.factor(ames$YrSold)
+ames$MoSold <- as.factor(ames$MoSold)
+```
+
+
+Investigate time when the house was sold
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = YrSold)) + geom_bar() + xlab("Year Sold")
+ames %>% ggplot(aes(x = YrSold, y = LogSalePrice)) + xlab("Year Sold") + ylab("Log(Sale Price)") + geom_boxplot()
+ames %>% ggplot(aes(x = MoSold, y = LogSalePrice)) + geom_boxplot()
+```
+
+## NA values
+
+Find columns with NAs.
+
+```{r,  message=FALSE, warning=FALSE}
+naTF <- sapply(ames, anyNA)
+amesNaCols <- colnames(ames[,naTF])
+amesNaCols
+```
+
+Deal with NA columns. For factor variables, we add a new level corresponding to if the variable is missing from that observation. For numerical variables, NAs arise because some factor is already set to 0 (i.e, there is no basement), so we convert NAs to 0.
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% mutate(LotFrontage = ifelse(is.na(LotFrontage), 0, LotFrontage),
+                        MasVnrType = addNA(MasVnrType),
+                        MasVnrArea = ifelse(is.na(MasVnrArea), 0, MasVnrArea),
+                        BsmtQual = addNA(BsmtQual),
+                        BsmtCond = addNA(BsmtCond),
+                        BsmtExposure = addNA(BsmtExposure),
+                        BsmtFinType1 = addNA(BsmtFinType1),
+                        BsmtFinType2 = addNA(BsmtFinType2),
+                        BsmtFinSF1 = ifelse(is.na(BsmtFinSF1), 0, BsmtFinSF1),
+                        BsmtFinSF2 = ifelse(is.na(BsmtFinSF2), 0, BsmtFinSF2),
+                        BsmtUnfSF = ifelse(is.na(BsmtUnfSF), 0, BsmtUnfSF),
+                        TotalBsmtSF = ifelse(is.na(TotalBsmtSF), 0, TotalBsmtSF),
+                        Electrical = addNA(Electrical),
+                        BsmtFullBath = ifelse(is.na(BsmtFullBath), 0, BsmtFullBath),
+                        BsmtHalfBath = ifelse(is.na(BsmtHalfBath), 0, BsmtHalfBath),
+                        GarageFinish = addNA(GarageFinish),
+                        GarageCars = ifelse(is.na(GarageCars), 0, GarageCars),
+                        GarageArea = ifelse(is.na(GarageArea), 0, GarageArea),
+                        GarageQual = addNA(GarageQual),
+                        GarageCond = addNA(GarageCond),
+                        YearsSince1950GarageBuilt = ifelse(is.na(YearsSince1950GarageBuilt), 0, YearsSince1950GarageBuilt))
+```
+
+Check again:
+
+```{r,  message=FALSE, warning=FALSE}
+naTF <- sapply(ames, anyNA)
+amesNaCols <- colnames(ames[,naTF])
+amesNaCols
+```
+
+## Outliers
+
+Remove outliers?
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = GrLivArea, y = LogSalePrice)) + geom_point()
+```
+
+```{r,  message=FALSE, warning=FALSE}
+ames <- ames %>% filter(GrLivArea < 4000)
+ames %>% ggplot(aes(x = GrLivArea, y = LogSalePrice)) + geom_point()
+```
+
+## Some More EDA
+
+Let's look at plots of some continuous variables vs. LogSalePrice.
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = LotFrontage, y = LogSalePrice)) + geom_point()
+ames %>% ggplot(aes(x = LotArea, y = LogSalePrice)) + geom_point()
+ames %>% ggplot(aes(x = MasVnrArea, y = LogSalePrice)) + geom_point()
+ames %>% ggplot(aes(x = TotalBsmtSF, y = LogSalePrice)) + geom_point()
+ames %>% ggplot(aes(x = X1stFlrSF, y = LogSalePrice)) + geom_point()
+ames %>% ggplot(aes(x = X2ndFlrSF, y = LogSalePrice)) + geom_point()
+ames %>% ggplot(aes(x = PoolArea, y = LogSalePrice)) + geom_point()
+ames %>% ggplot(aes(x = GarageArea, y = LogSalePrice)) + geom_point()
+```
+
+Smoothed versions of those plots.
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = LotFrontage, y = LogSalePrice)) + geom_smooth()
+ames %>% ggplot(aes(x = LotArea, y = LogSalePrice)) + geom_smooth()
+ames %>% ggplot(aes(x = MasVnrArea, y = LogSalePrice)) + geom_smooth()
+ames %>% ggplot(aes(x = TotalBsmtSF, y = LogSalePrice)) + geom_smooth()
+ames %>% ggplot(aes(x = X1stFlrSF, y = LogSalePrice)) + geom_smooth()
+ames %>% ggplot(aes(x = X2ndFlrSF, y = LogSalePrice)) + geom_smooth()
+ames %>% ggplot(aes(x = PoolArea, y = LogSalePrice)) + geom_smooth()
+ames %>% ggplot(aes(x = GarageArea, y = LogSalePrice)) + geom_smooth()
+```
+
+It appears that there are nonlinear relationships. Later, we will use polynomials to enhance our models. 
+
+Let's look at discrete variables now.
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = as.factor(BsmtFullBath), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(BsmtHalfBath), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(FullBath), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(HalfBath), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(BedroomAbvGr), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(KitchenAbvGr), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(TotRmsAbvGrd), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(Fireplaces), y = LogSalePrice)) + geom_boxplot()
+ames %>% ggplot(aes(x = as.factor(GarageCars), y = LogSalePrice)) + geom_boxplot()
+```
+
+Let's convert those all to factors.
+
+```{r,  message=FALSE, warning=FALSE}
+ames$BsmtFullBath <- as.factor(ames$BsmtFullBath)
+ames$BsmtHalfBath <- as.factor(ames$BsmtHalfBath)
+ames$FullBath <- as.factor(ames$FullBath)
+ames$HalfBath <- as.factor(ames$HalfBath)
+ames$BedroomAbvGr <- as.factor(ames$BedroomAbvGr)
+ames$KitchenAbvGr <- as.factor(ames$KitchenAbvGr)
+ames$TotRmsAbvGrd <- as.factor(ames$TotRmsAbvGrd)
+ames$Fireplaces <- as.factor(ames$Fireplaces)
+ames$GarageCars <- as.factor(ames$GarageCars)
+ames$MSSubClass <- as.factor(ames$MSSubClass)
+```
+
+```{r,  message=FALSE, warning=FALSE}
+as_tibble(ames)
+```
+
+
+
+# Regression Analysis
+
+## Preliminaries
+
+### Helper Functions
+
+```{r,  message=FALSE, warning=FALSE}
+OSR2 <- function(predictions, train, test) {
+  SSE <- sum((test - predictions)^2)
+  SST <- sum((test - mean(train))^2)
+  r2 <- 1 - SSE/SST
+  return(r2)
+}
+
+printMetricsHelp <- function(train, test, pred.train, pred.test, doExp) {
+  if(doExp) {
+    train <- exp(train)
+    test <- exp(test)
+    pred.train <- exp(pred.train)
+    pred.test <- exp(pred.test)
+  }
+  
+  trainRsq <- OSR2(pred.train, train, train)
+  testRsq <- OSR2(pred.test, train, test)
+  trainMAE <- mean(abs(train - pred.train))
+  testMAE <- mean(abs(test - pred.test))
+  trainRMSE <- sqrt(mean((train - pred.train)^2))
+  testRMSE <- sqrt(mean((test - pred.test)^2))
+  
+  print(str_c("Training set R^2: ", trainRsq))
+  print(str_c("Training set MAE: ", trainMAE))
+  print(str_c("Training set RMSE: ", trainRMSE))
+  print(str_c("Test set R^2: ", testRsq))
+  print(str_c("Test set MAE: ", testMAE))
+  print(str_c("Test set RMSE: ", testRMSE))
+}
+
+printMetrics <- function(train, test, pred.train, pred.test) {
+  print("Metrics for Log(Sale Price):")
+  printMetricsHelp(train, test, pred.train, pred.test, FALSE)
+  print("")
+  print("Metrics for Sale Price:")
+  printMetricsHelp(train, test, pred.train, pred.test, TRUE)
+}
+```
+
+### Train/Test Split
+
+```{r,  message=FALSE, warning=FALSE}
+ames %>% ggplot(aes(x = YrSold)) + geom_bar()
+```
+
+```{r,  message=FALSE, warning=FALSE}
+train <- ames %>% filter(YrSold %in% c("2006", "2007", "2008"))
+test <- ames %>% filter(YrSold %in% c("2009", "2010"))
+train$YrSold <- NULL
+test$YrSold <- NULL
+```
+
+### Model Matrix
+
+```{r,  message=FALSE, warning=FALSE}
+poly_degree <- 10
+big_formula <- LogSalePrice ~ poly(LotFrontage, poly_degree) + poly(LotArea, 5) + poly(MasVnrArea, poly_degree) + poly(BsmtFinSF1, poly_degree) + poly(BsmtFinSF2, poly_degree) + poly(BsmtUnfSF, poly_degree) + poly(TotalBsmtSF, poly_degree) + poly(X1stFlrSF, poly_degree) + poly(X2ndFlrSF, poly_degree) + poly(LowQualFinSF, 5) + poly(GrLivArea, poly_degree) + poly(GarageArea, poly_degree) + poly(WoodDeckSF, poly_degree) + poly(OpenPorchSF, poly_degree) + poly(EnclosedPorch, poly_degree) + poly(X3SsnPorch, poly_degree) + poly(ScreenPorch, poly_degree) + poly(MiscVal, poly_degree) + poly(YearsSince1950Built, poly_degree) + poly(YearsSince1950Remod, poly_degree) + poly(YearsSince1950GarageBuilt, poly_degree) -1 + .
+
+trainY <- train$LogSalePrice
+trainX <- model.matrix(big_formula, data = train)
+
+testY <- test$LogSalePrice
+testX <- model.matrix(big_formula, data = test)
+```
+
+## Naive Linear Regression
+
+```{r,  message=FALSE, warning=FALSE}
+train.df <- as.data.frame(cbind(trainY, trainX))
+mod.naive <- lm(trainY ~ ., data = train.df)
+summary(mod.naive)
+```
+
+
+## "Common Sense" Linear Regression
+
+```{r,  message=FALSE, warning=FALSE}
+mod.commonsense <- lm(LogSalePrice ~ MSSubClass + as.numeric(OverallQual) + YearsSince1950Built + GrLivArea + as.numeric(TotRmsAbvGrd) + as.numeric(FullBath) + SaleCondition, data = train)
+summary(mod.commonsense)
+```
+
+Make predictions:
+
+```{r,  message=FALSE, warning=FALSE}
+pred.commonsense.train <- predict(mod.commonsense)
+pred.commonsense.test <- predict(mod.commonsense, newdata = test)
+printMetrics(trainY, testY, pred.commonsense.train, pred.commonsense.test)
+```
+
+## Principal Components Regression
+
+We have to first remove columns that are nearly constant, i.e., have small standard deviation. Then we use caret for cross validation and finally retrain the final model.  
+
+```{r,  message=FALSE, warning=FALSE}
+trainX.colSDs <- apply(trainX, 2, sd)
+trainX.constantCols <- which(abs(trainX.colSDs) < .1)
+trainX.pcr <- trainX[, -trainX.constantCols]
+
+set.seed(2312)
+train.pcr <- train(trainX.pcr, trainY, 
+                   method = "pcr", 
+                   preProcess = c("center", "scale", "pca"),
+                   trControl = trainControl(method = "cv", number = 10, selectionFunction = "oneSE"),
+                   tuneGrid = data.frame(ncomp = seq_len(100)))
+train.pcr
+train.pcr$results %>% ggplot(aes(x = ncomp, y = RMSE)) + geom_point(size = 3) + 
+  ylab("CV RMSE") + theme_bw() + theme(axis.title=element_text(size=18), axis.text=element_text(size=18))
+
+train.df.pcr <- as.data.frame(cbind(trainY, trainX.pcr))
+mod.pcr <- pcr(trainY ~ ., data = train.df.pcr, scale = TRUE, ncomp = 30)
+```
+
+Make predictions:
+
+```{r,  message=FALSE, warning=FALSE}
+testX.pcr <- testX[, -trainX.constantCols]
+test.df.pcr <- as.data.frame(cbind(testY, testX.pcr))
+
+pred.pcr.train <- predict(mod.pcr, newdata = train.df.pcr, ncomp = 30)
+pred.pcr.test <- predict(mod.pcr, newdata = test.df.pcr, ncomp = 30)
+printMetrics(trainY, testY, pred.pcr.train, pred.pcr.test)
+```
+
+## Ridge Regression
+
+Glmnet is the package for both ridge regression and LASSO. [Here](https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html) is a useful resource on Glmnet.
+
+Syntax:
+
+* Glmnet requires an explicit model matrix -- it does not work with data frames.
+* `alpha = 0` says to do ridge regression
+* Here we are letting `glmnet` choose the grid of `lambda` (regularization parameter) values automatically. Optionally, you can use the parameters `lambda.min.ratio` (smallest value of lambda relative to the largest value of lambda) and `nlambda` to guide how `glmnet` chooses the grid.
+
+```{r,  message=FALSE, warning=FALSE, cache = TRUE}
+set.seed(1112)
+mod.ridge <- glmnet(x = trainX, y = trainY, alpha = 0)
+
+# mod.ridge <- glmnet(x = trainX, y = trainY, alpha = 0, lambda.min.ratio = 10^-6, nlambda = 500)
+```
+
+Basic output:
+
+* `mod.ridge$lambda` returns the sequence of `lambda` values
+* `coef(mod.ridge)` returns a p x nlambda matrix of lambda values -- each column is a different value of lambda
+* We can apply `plot` to the fitted model to get a nice plot of the coefficients.
+
+```{r,  message=FALSE, warning=FALSE, cahce = TRUE}
+mod.ridge$lambda
+
+coefs.ridge <- coef(mod.ridge)
+
+plot(mod.ridge, xvar = "lambda")
+```
+
+Cross validation! We'll do this directly with glmnet as opposed to caret. The syntax is similar to glmnet. Default is 10-fold cross validation and MSE (equivalent to RMSE) -- these may be changed.
+
+```{r,  message=FALSE, warning=FALSE}
+?cv.glmnet
+
+set.seed(3134)
+cv.ridge <- cv.glmnet(x = trainX, y = trainY, alpha = 0)
+
+plot(cv.ridge)
+```
+
+We'll make predictions directly with the cv.glmnet object. Default is to use the "1 standard error" rule for choosing lambda.
+
+```{r,  message=FALSE, warning=FALSE}
+?predict.cv.glmnet
+
+print(str_c("Chosen lambda: ", cv.ridge$lambda.1se))
+
+pred.ridge.train <- predict(cv.ridge, newx = trainX)
+pred.ridge.test <- predict(cv.ridge, newx = testX)
+printMetrics(trainY, testY, pred.ridge.train, pred.ridge.test)
+```
+
+
+### Naive least squares
+
+We can also recover the predictions for the naive least squares model from the fitted ridge model (Note least squares is lambda = 0). We use `s = 0` to denote lambda = 0 and `exact = TRUE` says to recompute the estimator at lambda = 0, instead of doing an interpolation over the grid of lambda values.
+
+```{r,  message=FALSE, warning=FALSE}
+pred.naivelr.train <- predict(mod.ridge, newx = trainX, s = 0, exact = TRUE,x = trainX, y = trainY)
+pred.naivelr.test <- predict(mod.ridge, newx = testX, s = 0, exact = TRUE, x = trainX, y = trainY)
+printMetrics(trainY, testY, pred.naivelr.train, pred.naivelr.test)
+```
+
+## LASSO
+
+LASSO is glmnet with `alpha = 1`
+
+```{r,  message=FALSE, warning=FALSE, cache = TRUE}
+set.seed(3439)
+mod.lasso <- glmnet(x = trainX, y = trainY, alpha = 1)
+```
+
+Output:
+
+```{r,  message=FALSE, warning=FALSE}
+mod.lasso$lambda
+
+coefs.lasso <- coef(mod.lasso)
+
+plot(mod.lasso, xvar = "lambda")
+```
+
+Cross-validation:
+
+```{r,  message=FALSE, warning=FALSE, cache = TRUE}
+set.seed(821)
+cv.lasso <- cv.glmnet(x = trainX, y = trainY, alpha = 1)
+
+cv.lasso$lambda.min
+cv.lasso$lambda.1se
+
+plot(cv.lasso)
+```
+
+Out-of-sample performance:
+
+```{r,  message=FALSE, warning=FALSE}
+pred.lasso.train <- predict(cv.lasso, newx = trainX)
+pred.lasso.test <- predict(cv.lasso, newx = testX)
+
+# tells us the non-zero coefficient indicies
+nzero.lasso <- predict(cv.lasso, type = "nonzero")
+
+printMetrics(trainY, testY, pred.lasso.train, pred.lasso.test)
+```
+
+The common sense model uses 25 independent variables. What are the first 25 independent variables selected by LASSO?
+
+```{r,  message=FALSE, warning=FALSE}
+mod.lasso$df # gives the number of non-zero coefficients for each value of lambda
+lambda_24 <- mod.lasso$lambda[which(mod.lasso$df == 24)]
+
+lambda_24_coefs <- as.matrix(coef(mod.lasso, s = lambda_24))
+lambda_24_coefs_df <- data.frame(Variable = rownames(lambda_24_coefs),lambda_24_coefs)
+
+first_24 <- lambda_24_coefs_df %>% filter(X1 != 0)
+
+first_24$Variable
+```
+
+## Forward Stepwise
+
+```{r,  message=FALSE, warning=FALSE, cache = TRUE}
+mod.initial <- lm(trainY ~ 1, data = train.df)
+forward.big <- formula(lm(trainY ~ ., data = train.df))
+mod.forward <- step(mod.initial, steps = 25, direction = "forward", scope = forward.big)
+#summary(mod.forward)
+
+# predictions
+test.df <- as.data.frame(cbind(testY, testX))
+
+pred.forward.train <- predict(mod.forward, newdata = train.df)
+pred.forward.test <- predict(mod.forward, newdata = test.df)
+
+printMetrics(trainY, testY, pred.forward.train, pred.forward.test)
+```
+
+
+## Random Forests
+
+```{r,  message=FALSE, warning=FALSE, cache = TRUE}
+set.seed(95)
+mod.rf <- randomForest(x = trainX, y = trainY, do.trace = FALSE)
+```
+
+```{r,  message=FALSE, warning=FALSE}
+pred.rf.train <- predict(mod.rf, newdata = trainX)
+pred.rf.test <- predict(mod.rf, newdata = testX)
+
+printMetrics(trainY, testY, pred.rf.train, pred.rf.test)
+```
+
+
+
+

@@ -1,0 +1,10 @@
+# Nicolas Kardous IND 242 HW 1 Problem 3#
+#
+library(gdata) # load gdata package#
+help(read.xls) # documentation#
+mydata = read.xls("Wrangler242-Fall2019.csv") # Read data
+mydata = read.xls("Wrangler242-Fall2019.csv")
+read.csv("Wrangler242-Fall2019.csv") # Read data
+mydata = read.csv("Wrangler242-Fall2019.csv") # Read data
+print(mydata)
+Unemployment = mydata[:,5]
